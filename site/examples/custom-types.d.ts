@@ -55,6 +55,12 @@ export type LinkElement = { type: 'link'; url: string; children: Descendant[] }
 
 export type ButtonElement = { type: 'button'; children: Descendant[] }
 
+export type FillInElement = {
+  type: 'fill-in'
+  correctAnswer: string
+  children: Descendant[]
+}
+
 export type ListItemElement = { type: 'list-item'; children: Descendant[] }
 
 export type MentionElement = {
@@ -89,6 +95,7 @@ type CustomElement =
   | ImageElement
   | LinkElement
   | ButtonElement
+  | FillInElement
   | ListItemElement
   | MentionElement
   | ParagraphElement
