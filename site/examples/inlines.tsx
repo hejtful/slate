@@ -13,11 +13,11 @@ import {
   Descendant,
 } from 'slate'
 import { withHistory } from 'slate-history'
-import { LinkElement, ButtonElement } from './custom-types'
+import { LinkElement, ButtonElement, FillInElement } from './custom-types'
 
 import { Button, Icon, Toolbar } from '../components'
 
-const initialValue: Descendant[] = [
+const defaultInitialValue: Descendant[] = [
   {
     type: 'paragraph',
     children: [
@@ -59,6 +59,31 @@ const initialValue: Descendant[] = [
       { text: '' },
     ],
   },
+  {
+    type: 'paragraph',
+    children: [
+      {
+        text: 'For this exercise, ',
+      },
+      {
+        type: 'fill-in',
+        correctAnswer: 'here',
+        children: [{ text: 'here' }],
+      },
+      {
+        text: ' we also have a fill-in component. It appears as a ',
+      },
+      {
+        type: 'fill-in',
+        correctAnswer: 'pre-filled input field',
+        children: [{ text: 'pre-filled input field' }],
+      },
+      {
+        text:
+          'in the editor, while it will appear as an empty input field to the user.',
+      },
+    ],
+  },
 ]
 const InlinesExample = () => {
   const editor = useMemo(
@@ -66,8 +91,23 @@ const InlinesExample = () => {
     []
   )
 
+  // Load the initial value from LocalStorage or use the default initial value
+  const initialValue = useMemo(
+    () => JSON.parse(localStorage.getItem('content')) || defaultInitialValue,
+    []
+  )
+
   const onKeyDown: React.KeyboardEventHandler<HTMLInputElement> = event => {
     const { selection } = editor
+    const { nativeEvent } = event
+
+    // Note: "mod+e" is probably not the most intuitive shortcut.
+    // I didn't want to spend time on figuring out the most user-friendly
+    // shortcut, though, so I just chose something simple for the PoC.
+    if (isKeyHotkey('mod+e', nativeEvent)) {
+      event.preventDefault()
+      toggleFillIn(editor)
+    }
 
     // Default left/right behavior is unit:'character'.
     // This fails to distinguish between two cursor positions, such as
@@ -76,7 +116,6 @@ const InlinesExample = () => {
     // This lets the user step into and out of the inline without stepping over characters.
     // You may wish to customize this further to only use unit:'offset' in specific cases.
     if (selection && Range.isCollapsed(selection)) {
-      const { nativeEvent } = event
       if (isKeyHotkey('left', nativeEvent)) {
         event.preventDefault()
         Transforms.move(editor, { unit: 'offset', reverse: true })
@@ -90,18 +129,77 @@ const InlinesExample = () => {
     }
   }
 
+  const onKeyUp: React.KeyboardEventHandler<HTMLInputElement> = event => {
+    // When the user updates the text inside of a fill-in element, the correct
+    // answer value should will also be updated.
+    // As only the root contenteditable element supports keyboard events,
+    // Slate helpers will be used to get the updated text.
+    if (isFillInActive(editor)) {
+      let correctAnswer: string
+
+      // Note: `Editor.node` helper exists, but seems to have a different function
+      // from `Editor.nodes`. (slate/src/interfaces/editor.ts, line 878)
+
+      // Get the nodes with the type of "fill-in" from the current selection
+      // (there will be only one, as it's not possible to have nested fill-in elements)
+      const fillInNodes = Editor.nodes(editor, {
+        // `at` is current selection by default (slate/src/interfaces/editor.ts, line 900)
+        match: n =>
+          !Editor.isEditor(n) &&
+          SlateElement.isElement(n) &&
+          n.type === 'fill-in',
+      })
+
+      // Iterate through fill-in nodes and get the text from the only one
+      for (const nodeEntry of fillInNodes) {
+        const text =
+          SlateElement.isElement(nodeEntry[0]) && nodeEntry[0].children[0].text
+        correctAnswer = text
+      }
+
+      // Update the currently selected fill-in's correctAnswer property
+      Transforms.setNodes(
+        editor,
+        { correctAnswer },
+        // `at` is current selection by default
+        // (https://docs.slatejs.org/concepts/04-transforms#the-at-option)
+        {
+          match: n =>
+            !Editor.isEditor(n) &&
+            SlateElement.isElement(n) &&
+            n.type === 'fill-in',
+        }
+      )
+    }
+  }
+
   return (
-    <SlateReact.Slate editor={editor} value={initialValue}>
+    <SlateReact.Slate
+      editor={editor}
+      value={initialValue}
+      onChange={value => {
+        const isAstChange = editor.operations.some(
+          op => op.type !== 'set_selection'
+        )
+        if (isAstChange) {
+          // Save the value to Local Storage.
+          const content = JSON.stringify(value)
+          localStorage.setItem('content', content)
+        }
+      }}
+    >
       <Toolbar>
         <AddLinkButton />
         <RemoveLinkButton />
         <ToggleEditableButtonButton />
+        <ToggleFillInButton />
       </Toolbar>
       <Editable
         renderElement={props => <Element {...props} />}
         renderLeaf={props => <Text {...props} />}
         placeholder="Enter some text..."
         onKeyDown={onKeyDown}
+        onKeyUp={onKeyUp}
       />
     </SlateReact.Slate>
   )
@@ -111,7 +209,7 @@ const withInlines = editor => {
   const { insertData, insertText, isInline } = editor
 
   editor.isInline = element =>
-    ['link', 'button'].includes(element.type) || isInline(element)
+    ['link', 'button', 'fill-in'].includes(element.type) || isInline(element)
 
   editor.insertText = text => {
     if (text && isUrl(text)) {
@@ -146,6 +244,33 @@ const insertButton = editor => {
   }
 }
 
+const toggleFillIn = editor => {
+  const { selection } = editor
+
+  // If nothing is selected, do nothing
+  if (!selection) return
+
+  // If a fill-in is currently selected, remove it
+  if (isFillInActive(editor)) {
+    unwrapFillIn(editor)
+    return
+  }
+
+  // If text is currently selected, wrap it with a fill-in
+  if (Range.isExpanded(selection)) {
+    const selectedText = Editor.string(editor, selection)
+    wrapFillIn(editor, selectedText)
+    return
+  }
+
+  // If selection is collapsed, prompt the user for a correct
+  // answer and then wrap the correct answer with a fill-in
+  // (do nothing if the user submits an empty prompt)
+  const correctAnswer = window.prompt('Enter the correct answer:')
+  if (!correctAnswer) return
+  wrapFillIn(editor, correctAnswer)
+}
+
 const isLinkActive = editor => {
   const [link] = Editor.nodes(editor, {
     match: n =>
@@ -162,6 +287,14 @@ const isButtonActive = editor => {
   return !!button
 }
 
+const isFillInActive = editor => {
+  const [fillIn] = Editor.nodes(editor, {
+    match: n =>
+      !Editor.isEditor(n) && SlateElement.isElement(n) && n.type === 'fill-in',
+  })
+  return !!fillIn
+}
+
 const unwrapLink = editor => {
   Transforms.unwrapNodes(editor, {
     match: n =>
@@ -173,6 +306,13 @@ const unwrapButton = editor => {
   Transforms.unwrapNodes(editor, {
     match: n =>
       !Editor.isEditor(n) && SlateElement.isElement(n) && n.type === 'button',
+  })
+}
+
+const unwrapFillIn = editor => {
+  Transforms.unwrapNodes(editor, {
+    match: n =>
+      !Editor.isEditor(n) && SlateElement.isElement(n) && n.type === 'fill-in',
   })
 }
 
@@ -213,6 +353,27 @@ const wrapButton = editor => {
     Transforms.insertNodes(editor, button)
   } else {
     Transforms.wrapNodes(editor, button, { split: true })
+    Transforms.collapse(editor, { edge: 'end' })
+  }
+}
+
+const wrapFillIn = (editor, correctAnswer) => {
+  if (isFillInActive(editor)) {
+    unwrapFillIn(editor)
+  }
+
+  const { selection } = editor
+  const isCollapsed = selection && Range.isCollapsed(selection)
+  const fillIn: FillInElement = {
+    type: 'fill-in',
+    correctAnswer,
+    children: isCollapsed ? [{ text: correctAnswer }] : [],
+  }
+
+  if (isCollapsed) {
+    Transforms.insertNodes(editor, fillIn)
+  } else {
+    Transforms.wrapNodes(editor, fillIn, { split: true })
     Transforms.collapse(editor, { edge: 'end' })
   }
 }
@@ -283,6 +444,26 @@ const EditableButtonComponent = ({ attributes, children }) => {
   )
 }
 
+const FillInComponent = ({ attributes, children, element }) => {
+  const selected = useSelected()
+  return (
+    <span
+      {...attributes}
+      onClick={ev => ev.preventDefault()}
+      className={css`
+        padding: 0 6px;
+        border-bottom: 1px solid #767676;
+
+        ${selected && 'border-bottom: 3px solid #0000ee;'}
+      `}
+    >
+      <InlineChromiumBugfix />
+      {children}
+      <InlineChromiumBugfix />
+    </span>
+  )
+}
+
 const Element = props => {
   const { attributes, children, element } = props
   switch (element.type) {
@@ -290,6 +471,8 @@ const Element = props => {
       return <LinkComponent {...props} />
     case 'button':
       return <EditableButtonComponent {...props} />
+    case 'fill-in':
+      return <FillInComponent {...props} />
     default:
       return <p {...attributes}>{children}</p>
   }
@@ -367,6 +550,21 @@ const ToggleEditableButtonButton = () => {
       }}
     >
       <Icon>smart_button</Icon>
+    </Button>
+  )
+}
+
+const ToggleFillInButton = () => {
+  const editor = useSlate()
+  return (
+    <Button
+      active
+      onMouseDown={event => {
+        event.preventDefault()
+        toggleFillIn(editor)
+      }}
+    >
+      <Icon>border_color</Icon>
     </Button>
   )
 }
